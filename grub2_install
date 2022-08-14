@@ -1,0 +1,253 @@
+#!/bin/bash
+##################################################
+### 		 Md Jahidul Hamid 	       ###
+##################################################
+## >>> Modified by Carlo Gagiano 2022-08-12 <<< ##
+##################################################
+
+# Need to fix /dev/sdX to NVME, currently stripping of 2 letters with "${dev:0:-2}"
+
+help="
+****** grubfix (2.0.0) ******
+
+SYNOPSIS:
+	grubfix
+	grubfix [options]
+	grubfix [system: /dev/sdxy] [efi: /dev/sdxy]
+
+USAGE:
+	1st form (gives a menu to select the devices):
+		grubfix
+	2nd form (takes the system and efi device ids as parameter):
+		grubfix /dev/sdXY /dev/sdXY
+
+Where the first /dev/sdXY is the device id where your system is installed.
+and the second one is the efi boot device.
+
+If run in legacy mode, only the first device id is meaningful.
+
+X is a letter and Y is a number, A device id would look like: /dev/sdb1
+
+OPTIONS:
+	-h, --help          : show help menu
+	-co, --chroot-only  : launch chroot terminal
+	-l, --legacy				: Legacy mode (default is uefi)
+"
+
+msg_out(){
+	printf "\n*** $*\n" > /dev/stdout
+}
+
+err_out(){
+	printf "\nE: $*\n" > /dev/stderr
+}
+
+wrn_out(){
+	printf "\nW: $*\n" > /dev/stderr
+}
+
+err_exit(){
+	err_out "$*"
+	exit 1
+}
+
+chkroot(){
+	if [ "$(id -u)" != "0" ]; then
+	  err_out "root access required."
+	  exit 1
+	fi
+}
+
+unmount(){
+	mounted=$(mount |awk '{print $3}')
+	if echo "$mounted" |grep -qF /mnt/sys; then
+		if umount /mnt/sys || umount -lf /mnt/sys; then
+		  msg_out "unmounted /mnt/sys"
+		else
+		  wrn_out "unmounting /mnt/sys failed"
+		fi
+	fi
+	if echo "$mounted" |grep -qF /mnt/proc; then
+		if umount /mnt/proc || umount -lf /mnt/proc; then
+		  msg_out "unmounted /mnt/proc"
+		else
+		  wrn_out "unmounting /mnt/proc failed"
+		fi
+	fi
+	if echo "$mounted" |grep -qF /mnt/dev/pts; then
+		if umount /mnt/dev/pts || umount -lf /mnt/dev/pts; then
+		  msg_out "unmounted /mnt/dev/pts"
+		else
+		  wrn_out "unmounting /mnt/dev/pts failed"
+		fi
+	fi
+	if echo "$mounted" |grep -qF /mnt/dev; then
+		if umount /mnt/dev || umount -lf /mnt/dev; then
+		  msg_out "unmounted /mnt/dev"
+		else
+		  wrn_out "unmounting /mnt/dev failed"
+		fi
+	fi
+	if echo "$mounted" |grep -qF /mnt; then
+		if umount /mnt || umount -lf /mnt; then
+		  msg_out "unmounted /mnt"
+		else
+		  wrn_out "unmounting /mnt failed"
+		fi
+	fi
+}
+
+confirm(){
+  local dev="$1"
+  msg_out "Giving more info for confirmation"
+  msg_out "'fdisk -l $dev' says: \n$(fdisk -l "$dev")"
+  msg_out "'blkid $dev' says: \n$(blkid "$dev")"
+  echo
+  read -p "=== Please confirm (Y/n)?: " conf
+  if [ "$conf" = Y ] || [ "$conf" = y ]; then
+    msg_out "$dev confirmed..."
+    return 0
+  else
+    return 1
+  fi
+}
+
+chkroot
+
+trap unmount SIGTERM EXIT SIGQUIT
+
+dev=
+efi_dev=
+chroot_only=false
+legacy_mode=false
+while [ $# -gt 0 ]
+do
+  case "$1" in
+    -h|--help)
+      echo "$help"
+      exit 1
+      ;;
+    -co|--chroot-only)
+    	chroot_only=true
+    	;;
+    -l|--legacy)
+    	legacy_mode=true
+    	;;
+    *)
+      if [ "$dev" != "" ] && [ "$efi_dev" != "" ]; then
+        err_out "invalid option: '$1'"
+        exit 1
+      elif [ "$dev" = '' ]; then
+        dev="$1"
+			else
+				efi_dev=$1
+      fi
+    	;;
+  esac
+  shift
+done
+
+if [ "$dev" = "" ]; then
+  oIFS="$IFS"
+  IFS=$'\n'
+  diskl=($(fdisk -l 2>/dev/null |grep -i '^/dev/.*linux' | grep -iv 'swap') exit)
+
+  PS3="Choose a device (#?): "
+
+  echo "**********************************************************"
+  echo " Please choose the device where your system is installed. "
+  echo " A star (*) sign after the device id means it's bootable  "
+  echo " It is not necessary for a system partition to be bootable"
+  echo " Be careful. We need the device id where the filesystem  "
+  echo " resides, not where it is booted from.                    "
+  echo "**********************************************************"
+  echo
+  select dev in "${diskl[@]}"; do
+    if [ "$dev" != exit ]; then
+      if [ "$dev" = "" ]; then
+        continue
+      fi
+      dev=$(echo "$dev" | sed -n 's#\(/dev/[^[:blank:]]*\).*#\1#p')
+      msg_out "you have chosen: $dev"
+      if confirm "$dev"; then
+        break
+      fi
+    else
+      wrn_out "Aborted."
+      exit 1
+    fi
+  done
+elif ! confirm "$dev"; then
+  wrn_out "Aborted."
+  exit 1
+fi
+
+## Choose efi device
+
+if ! $legacy_mode; then
+	if [ "$efi_dev" = "" ]; then
+		oIFS="$IFS"
+		IFS=$'\n'
+		diskl=($(fdisk -l 2>/dev/null |grep -i 'efi') 'No uefi' exit)
+
+		PS3="Choose a efi device (#?): "
+
+		echo "***********************************************************"
+		echo " Please choose the uefi boot device."
+		echo " Be careful, we need the device id where it is booted from,"
+		echo " not where the root filesystem resides."
+		echo "***********************************************************"
+		echo
+		select efi_dev in "${diskl[@]}"; do
+			if [ "$efi_dev" != exit ] && [ "$efi_dev" != 'No uefi' ]; then
+				if [ "$efi_dev" = "" ]; then
+					continue
+				fi
+				efi_dev=$(echo "$efi_dev" | sed -n 's#\(/dev/[^[:blank:]]*\).*#\1#p')
+				msg_out "you have chosen: $efi_dev"
+				if confirm "$efi_dev"; then
+					break
+				fi
+			elif [ "$efi_dev" = 'No uefi' ]; then
+				legacy_mode=true
+				break
+			else
+				wrn_out "Aborted."
+				exit 1
+			fi
+		done
+	elif ! confirm "$efi_dev"; then
+		wrn_out "Aborted."
+		exit 1
+	fi
+fi
+
+umount /mnt  >/dev/null 2>&1 || umount -lf /mnt >/dev/null 2>&1 | true
+mount  -o nouuid "$dev" /mnt && msg_out "mounted $dev in /mnt" || err_out "mounting $dev in /mnt failed"
+mount --bind /dev /mnt/dev && msg_out "mounted /dev in /mnt/dev" || err_out "mounting /dev in /mnt/dev failed"
+mount --bind /dev/pts /mnt/dev/pts && msg_out "mounted /dev/pts in /mnt/dev/pts" || err_out "mounting /dev/pts in /mnt/dev/pts failed"
+mount --bind /proc /mnt/proc && msg_out "mounted /proc in /mnt/proc" || err_out "mounting /proc in /mnt/proc failed"
+mount --bind /sys /mnt/sys && msg_out "mounted /sys in /mnt/sys" || err_out "mounting /sys in /mnt/sys failed"
+
+if ! $chroot_only; then
+  if $legacy_mode; then
+		msg_out "chroot: running grub2-install ${dev:0:-2} ..."
+		chroot /mnt grub2-install "${dev:0:-2}"
+		msg_out "chroot: grub2-mkconfig -o /boot/grub2/grub.cfg ..."
+		chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
+	else
+		msg_out "chroot: running mount $efi_dev /boot/efi ..."
+		chroot /mnt mount $efi_dev /boot/efi
+		msg_out "chroot: running grub2-mkconfig -o /boot/grub2/grub.cfg ..."
+		chroot /mnt grub2-install --target=x86_64-efi --efi-directory=/boot/efi
+		msg_out "chroot: running grub2-mkconfig -o /boot/grub2/grub.cfg ..."
+		chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
+		msg_out "chroot: running umount /boot/efi"
+		chroot /mnt umount /boot/efi
+	fi
+else
+	xhost +
+	x-terminal-emulator -e "$SHELL -c 'chroot /mnt;exec bash;'" >/dev/null 2>&1 ||
+	xterm  -e "$SHELL -c 'chroot /mnt;exec bash;'" >/dev/null 2>&1
+	xhost -
+fi
